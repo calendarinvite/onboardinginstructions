@@ -1,0 +1,151 @@
+Establish Code Repos in GitHub:
+  1. set up GitHub account 
+  2. create GitHub secret
+  3. create/upload repos
+    - calendarsnack-cicd
+    - calendarsnack-event-management
+    - calendarsnack-dashboard
+    - calendarsnack-shared-library
+
+Set up AWS profiles for running sceptre from CLI:
+- With IAM Identity Center SSO logged in (profiles should have admin access to prod and dev accounts):
+    In terminal, run `aws configure sso`:
+      - SSO session name: hit enter to bypass
+      - SSO start URL: provide start url for AWS IAM Identity Center
+      - SSO region: us-west-2
+      - In browser, login with SSO/Identity Center creds to the url provided and enter the code, allow access
+      - Back in terminal, select the appropriate account (calendarsnack-dev or calendarsnack-prod) and role (AdministratorAccess)
+      - CLI default client Region: us-west-2
+      - CLI default output format: yaml or json
+      - CLI profile name (should match the "profile" value in the following files for the corresponding env/account):
+        - config
+          - infra/config.yaml (calendarsnack-dev)
+          - prod/config.yaml (calendarsnack-prod)
+
+Update CICD with GitHub actions and AWS CodeBuild:
+  Update references to GitHub account (and repo, if desired) in corresponding repo files:
+    - Repo: calendarsnack-cicd
+      Paths:
+      - /config/infra/:
+          cicd:
+            sceptre-launch.yaml:
+              GitHubAccount: {GitHubAccount}
+              GitHubRepo: {calendarsnack-cicd}
+            dashboard:
+              pr.yaml:
+                GitHubAccount: {GitHubAccount}
+                GitHubRepo: {calendarsnack-dashboard}
+              publish.yaml:
+                GitHubAccount: {GitHubAccount}
+                GitHubRepo: {calendarsnack-dashboard}
+            event-management:
+              pr.yaml:
+                GitHubAccount: {GitHubAccount}
+                GitHubRepo: calendarsnack-event-management
+              publish.yaml:
+                GitHubAccount: {GitHubAccount}
+                GitHubRepo: calendarsnack-event-management
+            shared-library:
+              pr.yaml:
+                GitHubAccount: {GitHubAccount}
+                GitHubRepo: {calendarsnack-shared-library}
+              publish.yaml:
+                GitHubAccount: {GitHubAccount}
+                GitHubRepo: {calendarsnack-shared-library}
+    - Repo: calendarsnack-dashboard
+      Paths:
+      - .gitmodules:
+          path = src/layers/shared/{calendarsnack-shared-library}
+          url = https://github.com/{GitHubAccount}/{calendarsnack-shared-library}.git
+      - .github/workflows/main.yaml:
+          with:
+            repository: {GitHubAccount}/{calendarsnack-shared-library}
+    - Repo: calendarsnack-event-management
+      Paths:
+      - .gitmodules:
+          path = src/layers/shared/calendarsnack-shared-library
+          url = https://github.com/{GitHubAccount}/{calendarsnack-shared-library}.git
+      - .github/workflows/main.yaml:
+          with:
+            repository: {GitHubAccount}/{calendarsnack-shared-library}
+  Run sceptre update:
+    - Repo: calendarsnack-cicd
+      CLI Command: sceptre launch infra -y 
+
+Managing Code Changes: |
+    We use short lived branches for committing changes through Pull Requests into the main branch.
+    
+    The Pull Request triggers GitHub actions to run linters and tests.
+    
+    When a PR is merged, subsequent actions are triggered.
+
+    For calendarsnack-cicd, we manually run sceptre launch from the latest version of the main branch,
+    but there is an automation script in calendarsnack-cicd/.aws/buildspecs/sceptre-launch.yaml that
+    has not been used/tested in a while.
+    
+    When a new application (in the other 3 repos) is ready to be deployed, 
+    after the changes have been merged into the main branch, then we run the following from 
+    the latest version of main:
+    
+        'git tag -am "Release vX.x.x" X.x.x'
+        'git push origin X.x.x'
+    
+    This tagged release triggers CodeBuild to deploy a new version to AWS Serverless Application Repository.
+
+    From there, you can update the default version for the respective application group in 
+    calendarsnack-cicd/config/prod/packaged.yaml. You can also update the specific version of an application in the
+    corresponding calendarsnack-cicd/data/sam-apps. This way you can test and enable/disable various versions of the sam-apps
+    in the dev environment using sam cli to deploy custom versions.
+
+Repo Structure:
+  all_repos: 
+    .aws and .github: CICD configurations
+  calendarsnack-cicd:
+  - config: 
+      description: sceptre configurations (templates, parameter inputs, sceptre_user_data, profile, project, etc)
+      reference: https://docs.sceptre-project.org/latest/docs/stack_config.html#structure
+      infra: cicd pipelines and cloudformation buckets
+      prod: |
+        Our packaged prod stack. You can run 
+          
+          `sceptre create prod prod-changeset`
+          `sceptre describe change-set prod prod-changeset` (or view in the CloudFormation console) 
+        
+        to verify your changes before launching.
+  - data:
+      description: these files are mostly used for sceptre_user_data inputs. 
+      api: request/response templates and api-gateway configurations
+      cicd-code: lambda function code for sharing the SAM apps with accounts in our AWS Organization
+      email-templates: baseline html scripts that we reference (either from CodeCommit or S3) for SES notifications
+      sam-apps: contain the configuration for each app launched through the packaged template
+      shell-scripts: can be used in commented out code in .aws/buildspecs/sceptre-launch.yaml
+  - templates:
+      cicd: codebuild jobs, sam-app s3 bucket, and lambda to share sam apps with organization accounts
+      infra: >
+        s3 buckets, codestar connection, and sceptre-role 
+        (for use with commented out code in .aws/buildspecs/sceptre-launch.yaml) 
+      nested: sns-to-sqs pipeline referenced in packaged-solution.j2
+      packaged-solution.j2 file:
+        description: >
+          Our entire packaged template. We use jinja to support 
+          resource definition re-use and dynamic sceptre_user_data inputs 
+          https://docs.sceptre-project.org/latest/docs/templates.html#jinja
+        resources used: 
+        - AWS: ses, s3, sns, sqs, lambda, dynamodb, route53, acm, apigateway 
+          other (not mentioned in stack): siteground for managing existing dashboard DNS
+        event-management flow:
+          - email received in SES -> saved to S3
+          - new file in S3 -> SNS -> SQS -> Lambda
+            - process event information
+            - create/update events in DynamoDb <- API calls for dashboard
+            - send SES notifications
+
+  calendarsnack-dashboard/event-management/shared-library:
+  - docs - coverage report
+  - src - functions/apps and layers
+  - templates - sam templates
+
+
+
+    
+  
